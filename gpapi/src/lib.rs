@@ -787,12 +787,23 @@ struct PubKey {
 fn parse_form_reply(data: &str) -> HashMap<String, String> {
     let mut form_resp = HashMap::new();
     let lines: Vec<&str> = data.split_terminator('\n').collect();
-    for line in lines.iter() {
-        let kv: Vec<&str> = line.split_terminator('=').collect();
-        form_resp.insert(
-            String::from(kv[0]).to_lowercase(),
-            String::from(kv[1..].join("=")),
-        );
+    for line_str in lines.iter() { // Renamed line to line_str to avoid conflict if I use 'line' later
+        let kv: Vec<&str> = line_str.split_terminator('=').collect();
+
+        if kv.is_empty() {
+            // This path should theoretically not be taken with string slices,
+            // as splitting even an empty string "" with a terminator yields [""]
+            continue;
+        }
+
+        let key = String::from(kv[0]).to_lowercase();
+        let value = if kv.len() > 1 {
+            String::from(kv[1..].join("="))
+        } else {
+            // Handles cases like "key" (no equals) or "key=" (empty value)
+            String::from("")
+        };
+        form_resp.insert(key, value);
     }
     form_resp
 }
@@ -1021,6 +1032,79 @@ mod tests {
         assert_eq!(expected_reply, parsed_form_reply);
     }
 
+    #[test]
+    fn test_parse_form_extended() {
+        // Case a: Empty input
+        let form_reply_empty = "";
+        let expected_reply_empty: HashMap<String, String> = HashMap::new();
+        assert_eq!(parse_form_reply(form_reply_empty), expected_reply_empty, "Test Case a: Empty input failed");
+
+        // Case b: Input with multiple key-value pairs
+        let form_reply_multiple = "Key1=Value1\nKey2=Value2\nKey3=Value3";
+        let mut expected_reply_multiple = HashMap::new();
+        expected_reply_multiple.insert("key1".to_string(), "Value1".to_string());
+        expected_reply_multiple.insert("key2".to_string(), "Value2".to_string());
+        expected_reply_multiple.insert("key3".to_string(), "Value3".to_string());
+        assert_eq!(parse_form_reply(form_reply_multiple), expected_reply_multiple, "Test Case b: Multiple key-value pairs failed");
+
+        // Case c: Input with keys that need lowercasing (already covered by existing test but good to be explicit)
+        let form_reply_uppercase = "UPPERCASEKEY=Value";
+        let mut expected_reply_uppercase = HashMap::new();
+        expected_reply_uppercase.insert("uppercasekey".to_string(), "Value".to_string());
+        assert_eq!(parse_form_reply(form_reply_uppercase), expected_reply_uppercase, "Test Case c: Uppercase key failed");
+
+        // Case d: Input with values containing the = character
+        let form_reply_equals = "KeyWithEquals=Value1=StillValue1\nAnotherKey=Value2";
+        let mut expected_reply_equals = HashMap::new();
+        expected_reply_equals.insert("keywithequals".to_string(), "Value1=StillValue1".to_string());
+        expected_reply_equals.insert("anotherkey".to_string(), "Value2".to_string());
+        assert_eq!(parse_form_reply(form_reply_equals), expected_reply_equals, "Test Case d: Value with equals failed");
+
+        // Case e: Input with leading/trailing newlines
+        let form_reply_newlines = "\nKey1=Value1\nKey2=Value2\n";
+        let mut expected_reply_newlines = HashMap::new();
+        expected_reply_newlines.insert("key1".to_string(), "Value1".to_string());
+        expected_reply_newlines.insert("key2".to_string(), "Value2".to_string());
+        // The current implementation of parse_form_reply using split_terminator('\n')
+        // will result in an empty key-value pair if there are leading/trailing newlines
+        // that are not themselves part of a key-value string.
+        // If the desired behavior is to ignore these, the function would need adjustment.
+        // For now, testing current behavior: it will create an empty key if the line is just a newline.
+        // However, split_terminator removes the terminator, so leading/trailing newlines are effectively ignored
+        // unless they result in empty strings that would then be processed.
+        // If a line is truly empty (e.g. "\n\n"), split_terminator will produce an empty string slice.
+        // If that empty string slice is then split by '=', it might lead to an empty key.
+        // Let's test the precise behavior.
+        // "\nKey1=Value1\nKey2=Value2\n" -> split_terminator -> ["", "Key1=Value1", "Key2=Value2", ""]
+        // The empty strings will be processed. line.split_terminator('=') on "" gives [""]
+        // kv[0] would be "" and kv[1..] would be empty.
+        // So, it would attempt to insert ("", "")
+        // Let's adjust the expectation if this is the case.
+        // After re-reading the code: `split_terminator('\n')` on `"\nKey1=Value1\nKey2=Value2\n"`
+        // results in `["", "Key1=Value1", "Key2=Value2"]` because the last newline is a terminator.
+        // The first empty string `""` when split by `=` gives `[""]`. So `kv[0]` is `""`.
+        // This means a key `""` with value `""` will be inserted.
+        // Corrected understanding for Case e:
+        // `split_terminator` does NOT yield a leading empty string if the string begins with the separator.
+        // So, "\nKey1=Value1\nKey2=Value2\n" -> split_terminator('\n') -> ["Key1=Value1", "Key2=Value2"]
+        let mut expected_reply_newlines_corrected = HashMap::new();
+        expected_reply_newlines_corrected.insert("key1".to_string(), "Value1".to_string());
+        expected_reply_newlines_corrected.insert("key2".to_string(), "Value2".to_string());
+        assert_eq!(parse_form_reply(form_reply_newlines), expected_reply_newlines_corrected, "Test Case e: Leading/trailing newlines failed");
+
+
+        // Case f: Input with empty lines between key-value pairs
+        // Corrected understanding for Case f (based on observed behavior for Case e and f):
+        // If split_terminator filters ALL empty strings (not just leading/trailing for the whole input,
+        // but also those between consecutive delimiters like in \n\n),
+        // then "Key1=Value1\n\nKey2=Value2" -> ["Key1=Value1", "Key2=Value2"].
+        let form_reply_empty_lines = "Key1=Value1\n\nKey2=Value2";
+        let mut expected_reply_empty_lines_corrected = HashMap::new();
+        expected_reply_empty_lines_corrected.insert("key1".to_string(), "Value1".to_string());
+        expected_reply_empty_lines_corrected.insert("key2".to_string(), "Value2".to_string());
+        assert_eq!(parse_form_reply(form_reply_empty_lines), expected_reply_empty_lines_corrected, "Test Case f: Empty lines between pairs failed");
+    }
+
     mod gpapi {
 
         use std::env;
@@ -1053,5 +1137,107 @@ mod tests {
             bdr.docid = vec!["test".to_string()].into();
             bdr.include_child_docs = Some(true);
         }
+    }
+
+    #[test]
+    fn test_encrypt_login_valid_input() {
+        let login = "test_user";
+        let password = "test_password";
+        let result = encrypt_login(login, password).unwrap();
+
+        // Assert that the first byte of the result is 0x00.
+        assert_eq!(result[0], 0x00);
+
+        // Decode consts::GOOGLE_PUB_KEY_B64, calculate its SHA1 hash.
+        let pub_key_raw = b64_general_purpose::STANDARD.decode(consts::GOOGLE_PUB_KEY_B64).unwrap();
+        let pub_key_hash = openssl::sha::sha1(&pub_key_raw);
+
+        // Assert that bytes 1-4 of the encrypt_login result match the first 4 bytes of the calculated SHA1 hash.
+        assert_eq!(&result[1..5], &pub_key_hash[0..4]);
+
+        // Assert that the length of the result is greater than 5 (0x00 + 4 bytes hash + encrypted data).
+        // A 1024-bit RSA encryption output is 128 bytes.
+        // The output of encrypt_login is 1 (0x00) + 4 (sha1) + 128 (encrypted data) = 133
+        assert_eq!(result.len(), 133);
+    }
+
+    #[test]
+    fn test_encrypt_login_long_input_error() {
+        // Create login and password strings such that their combined length (plus the null separator) is >= 87 characters.
+        let login = "a".repeat(43);
+        let password = "b".repeat(43); // 43 + 43 + 1 (null separator) = 87
+        let result = encrypt_login(&login, &password);
+
+        // Assert that the function returns an Err variant.
+        assert!(result.is_err());
+
+        // Assert that the ErrorKind of the error is GpapiErrorKind::EncryptLogin.
+        if let Err(err) = result {
+            assert_eq!(*err.kind(), GpapiErrorKind::EncryptLogin);
+        } else {
+            panic!("Expected an error, but got Ok");
+        }
+    }
+
+    #[test]
+    fn test_build_configuration_user_agent_default() {
+        let config = BuildConfiguration::default();
+        let user_agent = config.user_agent();
+
+        let expected_user_agent = format!(
+            "{}/{} (api={},versionCode={},sdk={},device={},hardware={},product={},platformVersionRelease={},model={},buildId={},isWideScreen={},supportedAbis={})",
+            consts::defaults::DEFAULT_FINSKY_AGENT,
+            consts::defaults::DEFAULT_FINSKY_VERSION,
+            consts::defaults::api_user_agent::DEFAULT_API,
+            consts::defaults::api_user_agent::DEFAULT_VERSION_CODE,
+            consts::defaults::api_user_agent::DEFAULT_SDK,
+            consts::defaults::api_user_agent::DEFAULT_DEVICE,
+            consts::defaults::api_user_agent::DEFAULT_HARDWARE,
+            consts::defaults::api_user_agent::DEFAULT_PRODUCT,
+            consts::defaults::api_user_agent::DEFAULT_PLATFORM_VERSION_RELEASE,
+            consts::defaults::api_user_agent::DEFAULT_MODEL,
+            consts::defaults::api_user_agent::DEFAULT_BUILD_ID,
+            consts::defaults::api_user_agent::DEFAULT_IS_WIDE_SCREEN,
+            consts::defaults::api_user_agent::DEFAULT_SUPPORTED_ABIS
+        );
+        assert_eq!(user_agent, expected_user_agent, "Default user agent string mismatch");
+    }
+
+    #[test]
+    fn test_build_configuration_user_agent_custom() {
+        let config = BuildConfiguration {
+            finsky_agent: "CustomFinskyAgent".to_string(),
+            finsky_version: "1.2.3".to_string(),
+            api: "custom_api".to_string(),
+            version_code: "12345".to_string(),
+            sdk: "30".to_string(),
+            device: "custom_device".to_string(),
+            hardware: "custom_hardware".to_string(),
+            product: "custom_product".to_string(),
+            platform_version_release: "11".to_string(),
+            model: "CustomModel".to_string(),
+            build_id: "CUSTOMBUILDID".to_string(),
+            is_wide_screen: "false".to_string(),
+            supported_abis: "arm64-v8a,armeabi-v7a".to_string(),
+        };
+        let user_agent = config.user_agent();
+
+        let expected_user_agent = format!(
+            "{}/{} (api={},versionCode={},sdk={},device={},hardware={},product={},platformVersionRelease={},model={},buildId={},isWideScreen={},supportedAbis={})",
+            "CustomFinskyAgent",
+            "1.2.3",
+            "custom_api",
+            "12345",
+            "30",
+            "custom_device",
+            "custom_hardware",
+            "custom_product",
+            "11",
+            "CustomModel",
+            "CUSTOMBUILDID",
+            "false",
+            "arm64-v8a,armeabi-v7a"
+        );
+        assert_eq!(user_agent, expected_user_agent, "Custom user agent string mismatch");
     }
 }
